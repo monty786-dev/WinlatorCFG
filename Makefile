@@ -4,12 +4,12 @@ LIBS    = -lcomctl32 -lcomdlg32 -lgdi32 -luser32 -ladvapi32 -lshell32 -lwininet 
 
 all: winecfg-x64.exe winecfg-x86.exe
 
-winecfg-x64.exe: winecfg.c winecfg.rc winecfg.manifest
+winecfg-x64.exe: winecfg.c winecfg.rc winecfg.manifest winecfg.ico
 	x86_64-w64-mingw32-windres winecfg.rc -O coff -o res64.o
 	x86_64-w64-mingw32-gcc $(CFLAGS) winecfg.c res64.o -o $@ $(LIBS)
 	x86_64-w64-mingw32-strip $@
 
-winecfg-x86.exe: winecfg.c winecfg.rc winecfg.manifest
+winecfg-x86.exe: winecfg.c winecfg.rc winecfg.manifest winecfg.ico
 	i686-w64-mingw32-windres winecfg.rc -O coff -o res32.o
 	i686-w64-mingw32-gcc $(CFLAGS) winecfg.c res32.o -o $@ $(LIBS)
 	i686-w64-mingw32-strip $@

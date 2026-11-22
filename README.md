@@ -1,9 +1,18 @@
 # Winlator Configuration (modern winecfg replacement)
 
-A single-file C (Win32) program that replaces Wine's `winecfg.exe`, with a modern look
-(visual styles, gradient header, tabs) and extra Winlator-focused features.
+A single-file C (Win32) program that replaces Wine's `winecfg.exe`, with an Ubuntu-style look:
+aubergine vertical sidebar with icons, orange accent buttons, flat white content area.
 
-Tabs: Applications · Graphics · Libraries · Audio / Drives · Winlator Tweaks · About / Update
+Sidebar: Applications · Graphics · Libraries · Audio / Drives · Tweaks · Files · About
+(icons are drawn with GDI; the .exe icon is `winecfg.ico`).
+
+**Files tab:** browse, search and edit text files. Starts in `Z:\opt` (Z: is Wine's view of the
+Android/Linux root; if `Z:\opt` doesn't exist it opens `Z:\`). Type any path (e.g. `Z:\usr\share`) or use
+"Find in folder" to locate a file by name. Saving asks first and makes a `.bak` copy; read-only
+locations will show an "error 5 / read-only" message.
+
+Optional: copy `Ubuntu-R.ttf` / `UbuntuMono-R.ttf` into `C:\windows\Fonts` for the exact Ubuntu font
+(otherwise Wine falls back to a default font).
 
 New vs. stock winecfg: DXVK / VKD3D-Proton one-click presets, renderer + video memory + CSMT,
 virtual desktop & DPI, mouse-capture / borderless / focus fixes, crash-dialog and Mono/Gecko

@@ -13,6 +13,7 @@
 #define WIN32_LEAN_AND_MEAN
 #include <windows.h>
 #include <commctrl.h>
+#include <windowsx.h>
 #include <commdlg.h>
 #include <shellapi.h>
 #include <wininet.h>
@@ -22,7 +23,7 @@
 #include <wchar.h>
 
 /* ---------- configure these two for your own repository ---------- */
-#define APP_VERSION  "v1.0.0"
+#define APP_VERSION  "v1.1.0"
 #define UPDATE_REPO  "YOUR_GITHUB_USER/winlator-winecfg"
 /* ------------------------------------------------------------------ */
 
@@ -46,20 +47,35 @@
 #define K_FONTS L"Software\\Fonts"
 
 enum {
-    ID_TAB = 100, ID_APPLY, ID_CLOSE,
+    ID_SIDE = 100, ID_APPLY, ID_CLOSE,
     ID_APPLIST = 200, ID_APPADD, ID_APPDEL, ID_APPVER,
     ID_RENDERER, ID_VRAM, ID_CSMT, ID_STRICT, ID_VDESK, ID_VDW, ID_VDH, ID_DPI,
     ID_DLLLIST, ID_DLLNAME, ID_DLLMODE, ID_DLLADD, ID_DLLDEL,
     ID_AUDIO, ID_DRIVES,
     ID_T_CRASH, ID_T_GECKO, ID_T_GRAB, ID_T_NODECOR, ID_T_FOCUS, ID_T_DXVK, ID_T_VKD3D,
     ID_TOOL_TASK, ID_TOOL_REG, ID_TOOL_EXPL, ID_TOOL_UNINST, ID_TOOL_CMD,
-    ID_ABOUT_INFO, ID_UPD_CHECK, ID_UPD_INSTALL, ID_UPD_STATUS
+    ID_ABOUT_INFO, ID_UPD_CHECK, ID_UPD_INSTALL, ID_UPD_STATUS,
+    ID_F_PATH, ID_F_GO, ID_F_UP, ID_F_SEARCH, ID_F_FIND, ID_F_LIST, ID_F_NAME, ID_F_EDIT,
+    ID_F_SAVE, ID_F_RELOAD, ID_F_STAT
 };
 
-#define NPAGES 6
+/* Ubuntu / Yaru inspired palette */
+#define C_SIDE    RGB(48, 10, 36)
+#define C_HOT     RGB(88, 38, 74)
+#define C_ORANGE  RGB(233, 84, 32)
+#define C_ORANGE2 RGB(190, 64, 20)
+#define C_TEXT    RGB(51, 51, 51)
+#define C_SUB     RGB(119, 110, 113)
+#define C_BAR     RGB(246, 245, 244)
+#define SIDE_W    200
+#define ITEM_TOP  86
+#define ITEM_H    46
+#define WM_APP_PAGE (WM_APP + 1)
+
+#define NPAGES 7
 static HINSTANCE g_inst;
-static HWND g_main, g_tab, g_page[NPAGES];
-static HFONT g_font, g_font_title, g_font_sub;
+static HWND g_main, g_side, g_page[NPAGES];
+static HFONT g_font, g_font_head, g_font_sub, g_font_side, g_font_sideb, g_font_mono;
 static int g_dpi = 96;
 #define S(v) MulDiv((v), g_dpi, 96)
 
@@ -169,7 +185,7 @@ static HWND mk(int pg, const WCHAR *cls, const WCHAR *txt, DWORD st, DWORD ex,
 #define LABEL(pg, t, x, y, w)    mk(pg, L"STATIC", t, SS_LEFT, 0, x, y, w, 20, -1)
 #define GROUP(pg, t, x, y, w, h) mk(pg, L"BUTTON", t, BS_GROUPBOX, 0, x, y, w, h, -1)
 #define CHECK(pg, t, x, y, w, id) mk(pg, L"BUTTON", t, BS_AUTOCHECKBOX | WS_TABSTOP, 0, x, y, w, 22, id)
-#define BTN(pg, t, x, y, w, h, id) mk(pg, L"BUTTON", t, BS_PUSHBUTTON | WS_TABSTOP, 0, x, y, w, h, id)
+#define BTN(pg, t, x, y, w, h, id) mk(pg, L"BUTTON", t, BS_OWNERDRAW | WS_TABSTOP, 0, x, y, w, h, id)
 #define COMBO(pg, x, y, w, id)   mk(pg, L"COMBOBOX", NULL, CBS_DROPDOWNLIST | WS_VSCROLL | WS_TABSTOP, 0, x, y, w, 220, id)
 
 static void cb_fill(HWND cb, const WCHAR **items, int n)
@@ -188,9 +204,12 @@ static LRESULT CALLBACK PageProc(HWND h, UINT m, WPARAM w, LPARAM l)
     switch (m) {
     case WM_COMMAND:
         return SendMessageW(g_main, WM_COMMAND, w, l);
+    case WM_DRAWITEM:
+        return SendMessageW(g_main, WM_DRAWITEM, w, l);
     case WM_CTLCOLORSTATIC:
     case WM_CTLCOLORBTN:
         SetBkMode((HDC)w, TRANSPARENT);
+        SetTextColor((HDC)w, C_TEXT);
         return (LRESULT)GetSysColorBrush(COLOR_WINDOW);
     }
     return DefWindowProcW(h, m, w, l);
@@ -720,12 +739,457 @@ static void do_update(void)
 }
 
 /* ------------------------------------------------------------------ */
+/* Files page: browse / search / edit text files (default Z:\opt)     */
+/* ------------------------------------------------------------------ */
+static WCHAR g_dir[MAX_PATH] = L"Z:\\opt";
+static WCHAR g_file[MAX_PATH];
+static BOOL g_crlf, g_dirty, g_files_inited;
+
+static void files_status(const WCHAR *t) { SetWindowTextW(ctl(ID_F_STAT), t); }
+
+static void join_path(WCHAR *out, const WCHAR *dir, const WCHAR *name)
+{
+    size_t n = wcslen(dir);
+    if (n && dir[n - 1] == L'\\') _snwprintf(out, MAX_PATH - 1, L"%ls%ls", dir, name);
+    else _snwprintf(out, MAX_PATH - 1, L"%ls\\%ls", dir, name);
+    out[MAX_PATH - 1] = 0;
+}
+
+static BOOL confirm_discard(void)
+{
+    if (!g_dirty) return TRUE;
+    return MessageBoxW(g_main, L"The open file has unsaved changes. Discard them?", L"Unsaved changes",
+                       MB_YESNO | MB_ICONWARNING) == IDYES;
+}
+
+static void list_entries(HWND lb, const WCHAR *dir, BOOL want_dir)
+{
+    WIN32_FIND_DATAW fd; HANDLE h; WCHAR pat[MAX_PATH], line[MAX_PATH + 8]; int idx;
+    join_path(pat, dir, L"*");
+    h = FindFirstFileW(pat, &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        BOOL isdir = (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0;
+        if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..") || isdir != want_dir) continue;
+        if (isdir) _snwprintf(line, MAX_PATH + 7, L"[dir] %ls", fd.cFileName);
+        else _snwprintf(line, MAX_PATH + 7, L"%ls", fd.cFileName);
+        line[MAX_PATH + 7] = 0;
+        idx = (int)SendMessageW(lb, LB_ADDSTRING, 0, (LPARAM)line);
+        SendMessageW(lb, LB_SETITEMDATA, idx, isdir ? 1 : 0);
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+}
+
+static void files_list_dir(const WCHAR *dir)
+{
+    HWND lb = ctl(ID_F_LIST);
+    WCHAR msg[MAX_PATH + 40];
+    DWORD a = GetFileAttributesW(dir);
+    size_t n;
+    if (a == INVALID_FILE_ATTRIBUTES || !(a & FILE_ATTRIBUTE_DIRECTORY)) {
+        _snwprintf(msg, MAX_PATH + 39, L"Folder not found: %ls", dir);
+        msg[MAX_PATH + 39] = 0;
+        files_status(msg);
+        return;
+    }
+    wcsncpy(g_dir, dir, MAX_PATH - 1);
+    g_dir[MAX_PATH - 1] = 0;
+    n = wcslen(g_dir);
+    while (n > 3 && g_dir[n - 1] == L'\\') g_dir[--n] = 0;
+    SetWindowTextW(ctl(ID_F_PATH), g_dir);
+    SendMessageW(lb, LB_RESETCONTENT, 0, 0);
+    list_entries(lb, g_dir, TRUE);
+    list_entries(lb, g_dir, FALSE);
+    files_status(L"Click a file to open it. Double-click a [dir] to enter it.");
+}
+
+static void files_go(void)
+{
+    WCHAR p[MAX_PATH];
+    GetWindowTextW(ctl(ID_F_PATH), p, MAX_PATH);
+    files_list_dir(p);
+}
+
+static void files_up(void)
+{
+    WCHAR p[MAX_PATH], *s;
+    wcscpy(p, g_dir);
+    s = wcsrchr(p, L'\\');
+    if (s && s > p + 2) *s = 0; else if (wcslen(p) >= 3) p[3] = 0;
+    files_list_dir(p);
+}
+
+static BOOL has_ci(const WCHAR *s, const WCHAR *needle)
+{
+    size_t n = wcslen(needle);
+    for (; *s; s++) if (!_wcsnicmp(s, needle, n)) return TRUE;
+    return FALSE;
+}
+
+static int g_found;
+static void search_rec(HWND lb, const WCHAR *dir, const WCHAR *needle, int depth)
+{
+    WIN32_FIND_DATAW fd; HANDLE h; WCHAR pat[MAX_PATH], full[MAX_PATH];
+    if (g_found >= 300 || depth > 6) return;
+    join_path(pat, dir, L"*");
+    h = FindFirstFileW(pat, &fd);
+    if (h == INVALID_HANDLE_VALUE) return;
+    do {
+        if (!wcscmp(fd.cFileName, L".") || !wcscmp(fd.cFileName, L"..")) continue;
+        join_path(full, dir, fd.cFileName);
+        if (fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) {
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) search_rec(lb, full, needle, depth + 1);
+        } else if (has_ci(fd.cFileName, needle) && g_found < 300) {
+            int idx = (int)SendMessageW(lb, LB_ADDSTRING, 0, (LPARAM)full);
+            SendMessageW(lb, LB_SETITEMDATA, idx, 2);
+            g_found++;
+        }
+    } while (FindNextFileW(h, &fd));
+    FindClose(h);
+}
+
+static void files_find(void)
+{
+    WCHAR needle[128], msg[128];
+    HWND lb = ctl(ID_F_LIST);
+    GetWindowTextW(ctl(ID_F_SEARCH), needle, 128);
+    if (!needle[0]) { files_status(L"Type part of a file name to search for."); return; }
+    SetCursor(LoadCursor(NULL, IDC_WAIT));
+    SendMessageW(lb, LB_RESETCONTENT, 0, 0);
+    g_found = 0;
+    files_status(L"Searching...");
+    search_rec(lb, g_dir, needle, 0);
+    SetCursor(LoadCursor(NULL, IDC_ARROW));
+    _snwprintf(msg, 127, L"%d match(es) under %ls (max 300). Click one to open it.", g_found, g_dir);
+    msg[127] = 0;
+    files_status(g_found ? msg : L"No matching files found in this folder tree.");
+}
+
+static BOOL files_sel(WCHAR *path, int *kind)
+{
+    HWND lb = ctl(ID_F_LIST);
+    WCHAR t[MAX_PATH + 8];
+    int i = (int)SendMessageW(lb, LB_GETCURSEL, 0, 0), d;
+    if (i < 0) return FALSE;
+    SendMessageW(lb, LB_GETTEXT, i, (LPARAM)t);
+    d = (int)SendMessageW(lb, LB_GETITEMDATA, i, 0);
+    if (d == 2) { wcscpy(path, t); *kind = 0; }
+    else if (d == 1) { join_path(path, g_dir, t + 6); *kind = 1; }
+    else { join_path(path, g_dir, t); *kind = 0; }
+    return TRUE;
+}
+
+static void file_open(const WCHAR *path)
+{
+    HANDLE f; DWORD sz, rd = 0, i; char *buf; WCHAR *wide, *out; int wl, j, k;
+    WCHAR msg[MAX_PATH + 60];
+    f = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    if (f == INVALID_HANDLE_VALUE) {
+        _snwprintf(msg, MAX_PATH + 59, L"Cannot open file (error %lu).", (unsigned long)GetLastError());
+        files_status(msg); return;
+    }
+    sz = GetFileSize(f, NULL);
+    if (sz == INVALID_FILE_SIZE || sz > 1500000) { CloseHandle(f); files_status(L"File is too large to edit here (limit 1.5 MB)."); return; }
+    buf = (char *)malloc(sz + 1);
+    if (!buf || !ReadFile(f, buf, sz, &rd, NULL)) { CloseHandle(f); free(buf); files_status(L"Read error."); return; }
+    CloseHandle(f);
+    buf[rd] = 0;
+    for (i = 0; i < rd && i < 8192; i++)
+        if (!buf[i]) { free(buf); files_status(L"This looks like a binary file - not opened."); return; }
+    g_crlf = strstr(buf, "\r\n") != NULL;
+    wl = MultiByteToWideChar(CP_UTF8, 0, buf, (int)rd, NULL, 0);
+    wide = (WCHAR *)malloc((wl + 1) * sizeof(WCHAR));
+    out = (WCHAR *)malloc((wl * 2 + 2) * sizeof(WCHAR));
+    if (wide && out) {
+        if (wl) MultiByteToWideChar(CP_UTF8, 0, buf, (int)rd, wide, wl);
+        for (k = 0, j = 0; k < wl; k++) {
+            if (wide[k] == L'\r' && k + 1 < wl && wide[k + 1] == L'\n') continue;
+            if (wide[k] == L'\n') out[j++] = L'\r';
+            out[j++] = wide[k];
+        }
+        out[j] = 0;
+        SendMessageW(ctl(ID_F_EDIT), EM_LIMITTEXT, 4000000, 0);
+        SetWindowTextW(ctl(ID_F_EDIT), out);
+        wcscpy(g_file, path);
+        SetWindowTextW(ctl(ID_F_NAME), path);
+        g_dirty = FALSE;
+        files_status(L"File opened. Edit it, then press Save (a .bak backup is made).");
+    }
+    free(buf); free(wide); free(out);
+}
+
+static void file_save(void)
+{
+    int len, n, j, k, u8; WCHAR *w, *w2; char *b; HANDLE f; DWORD wr = 0; WCHAR bak[MAX_PATH + 8], msg[MAX_PATH + 80];
+    if (!g_file[0]) { files_status(L"Open a file first."); return; }
+    _snwprintf(msg, MAX_PATH + 79, L"Overwrite this file?\n\n%ls\n\nA backup copy (.bak) is created first.", g_file);
+    msg[MAX_PATH + 79] = 0;
+    if (MessageBoxW(g_main, msg, L"Save file", MB_YESNO | MB_ICONQUESTION) != IDYES) return;
+    len = GetWindowTextLengthW(ctl(ID_F_EDIT));
+    w = (WCHAR *)malloc((len + 2) * sizeof(WCHAR));
+    w2 = (WCHAR *)malloc((len + 2) * sizeof(WCHAR));
+    if (!w || !w2) { free(w); free(w2); return; }
+    GetWindowTextW(ctl(ID_F_EDIT), w, len + 1);
+    for (k = 0, j = 0; k < len; k++) {
+        if (!g_crlf && w[k] == L'\r' && k + 1 < len && w[k + 1] == L'\n') continue;
+        w2[j++] = w[k];
+    }
+    n = j;
+    u8 = WideCharToMultiByte(CP_UTF8, 0, w2, n, NULL, 0, NULL, NULL);
+    b = (char *)malloc(u8 + 1);
+    if (b) {
+        WideCharToMultiByte(CP_UTF8, 0, w2, n, b, u8, NULL, NULL);
+        _snwprintf(bak, MAX_PATH + 7, L"%ls.bak", g_file); bak[MAX_PATH + 7] = 0;
+        CopyFileW(g_file, bak, TRUE);
+        f = CreateFileW(g_file, GENERIC_WRITE, 0, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (f == INVALID_HANDLE_VALUE) {
+            _snwprintf(msg, MAX_PATH + 79, L"Cannot write file (error %lu). It may be read-only.", (unsigned long)GetLastError());
+            files_status(msg);
+        } else {
+            BOOL ok = WriteFile(f, b, u8, &wr, NULL) && (int)wr == u8;
+            CloseHandle(f);
+            if (ok) { g_dirty = FALSE; files_status(L"Saved."); } else files_status(L"Write error.");
+        }
+    }
+    free(b); free(w); free(w2);
+}
+
+static void files_init(void)
+{
+    g_files_inited = TRUE;
+    files_list_dir(L"Z:\\opt");
+    if (GetFileAttributesW(L"Z:\\opt") == INVALID_FILE_ATTRIBUTES) {
+        files_list_dir(L"Z:\\");
+        files_status(L"Z:\\opt does not exist here - showing Z:\\. Use Search to find your file.");
+    }
+}
+
+static void files_clicked(int code)
+{
+    WCHAR p[MAX_PATH]; int kind;
+    if (!files_sel(p, &kind)) return;
+    if (code == LBN_DBLCLK && kind == 1) { if (confirm_discard()) files_list_dir(p); }
+    else if (code == LBN_SELCHANGE && kind == 0) {
+        if (!_wcsicmp(p, g_file) || confirm_discard()) file_open(p);
+    }
+}
+
+/* ------------------------------------------------------------------ */
+/* Icons (drawn with GDI, 16x16 design grid)                           */
+/* ------------------------------------------------------------------ */
+static void draw_icon(HDC dc, int kind, int x, int y, int s, COLORREF col)
+{
+#define PX(v) (x + MulDiv((v), s, 16))
+#define PY(v) (y + MulDiv((v), s, 16))
+    HPEN pen = CreatePen(PS_SOLID, s / 12 > 1 ? s / 12 : 1, col), op;
+    HBRUSH fill = CreateSolidBrush(col), ob;
+    HBRUSH hollow = (HBRUSH)GetStockObject(NULL_BRUSH);
+    POINT pt[6];
+    int i;
+    op = (HPEN)SelectObject(dc, pen);
+    ob = (HBRUSH)SelectObject(dc, fill);
+    switch (kind) {
+    case 0: /* applications: 2x2 grid */
+        for (i = 0; i < 4; i++) {
+            int cx = (i & 1) ? 9 : 2, cy = (i & 2) ? 9 : 2;
+            RoundRect(dc, PX(cx), PY(cy), PX(cx + 5), PY(cy + 5), 2, 2);
+        }
+        break;
+    case 1: /* graphics: monitor */
+        SelectObject(dc, hollow);
+        RoundRect(dc, PX(1), PY(2), PX(15), PY(11), 3, 3);
+        MoveToEx(dc, PX(8), PY(11), NULL); LineTo(dc, PX(8), PY(14));
+        MoveToEx(dc, PX(4), PY(14), NULL); LineTo(dc, PX(12), PY(14));
+        break;
+    case 2: /* libraries: books */
+        Rectangle(dc, PX(2), PY(3), PX(5), PY(14));
+        Rectangle(dc, PX(6), PY(2), PX(9), PY(14));
+        Rectangle(dc, PX(10), PY(5), PX(14), PY(14));
+        break;
+    case 3: /* audio: speaker */
+        pt[0].x = PX(2); pt[0].y = PY(6); pt[1].x = PX(5); pt[1].y = PY(6);
+        pt[2].x = PX(9); pt[2].y = PY(3); pt[3].x = PX(9); pt[3].y = PY(13);
+        pt[4].x = PX(5); pt[4].y = PY(10); pt[5].x = PX(2); pt[5].y = PY(10);
+        Polygon(dc, pt, 6);
+        SelectObject(dc, hollow);
+        Arc(dc, PX(7), PY(4), PX(14), PY(12), PX(11), PY(12), PX(11), PY(4));
+        break;
+    case 4: /* tweaks: sliders */
+    {
+        static const int ky[3] = { 4, 8, 12 }, kx[3] = { 5, 11, 7 };
+        for (i = 0; i < 3; i++) {
+            MoveToEx(dc, PX(2), PY(ky[i]), NULL); LineTo(dc, PX(14), PY(ky[i]));
+            Ellipse(dc, PX(kx[i] - 2), PY(ky[i] - 2), PX(kx[i] + 2) + 1, PY(ky[i] + 2) + 1);
+        }
+        break;
+    }
+    case 5: /* files: folder */
+        pt[0].x = PX(1); pt[0].y = PY(4); pt[1].x = PX(6); pt[1].y = PY(4);
+        pt[2].x = PX(8); pt[2].y = PY(6); pt[3].x = PX(15); pt[3].y = PY(6);
+        pt[4].x = PX(15); pt[4].y = PY(13); pt[5].x = PX(1); pt[5].y = PY(13);
+        Polygon(dc, pt, 6);
+        break;
+    default: /* about: circled i */
+        SelectObject(dc, hollow);
+        Ellipse(dc, PX(1), PY(1), PX(15), PY(15));
+        SelectObject(dc, fill);
+        Ellipse(dc, PX(7), PY(4), PX(9) + 1, PY(6) + 1);
+        Rectangle(dc, PX(7), PY(7), PX(9) + 1, PY(12));
+        break;
+    }
+    SelectObject(dc, ob);
+    SelectObject(dc, op);
+    DeleteObject(pen);
+    DeleteObject(fill);
+#undef PX
+#undef PY
+}
+
+static void draw_logo(HDC dc, int x, int y, int s)
+{
+    HBRUSH b = CreateSolidBrush(C_ORANGE), ob;
+    HPEN p = CreatePen(PS_SOLID, 1, C_ORANGE), op;
+    HFONT of;
+    RECT r;
+    ob = (HBRUSH)SelectObject(dc, b);
+    op = (HPEN)SelectObject(dc, p);
+    Ellipse(dc, x, y, x + s, y + s);
+    SelectObject(dc, op); SelectObject(dc, ob);
+    DeleteObject(b); DeleteObject(p);
+    SetRect(&r, x, y, x + s, y + s);
+    SetBkMode(dc, TRANSPARENT);
+    SetTextColor(dc, RGB(255, 255, 255));
+    of = (HFONT)SelectObject(dc, g_font_sideb);
+    DrawTextW(dc, L"W", 1, &r, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    SelectObject(dc, of);
+}
+
+/* ------------------------------------------------------------------ */
+/* Sidebar (vertical tabs)                                             */
+/* ------------------------------------------------------------------ */
+static const WCHAR *g_names[NPAGES] = {
+    L"Applications", L"Graphics", L"Libraries", L"Audio / Drives", L"Tweaks", L"Files", L"About"
+};
+static const WCHAR *g_titles[NPAGES] = {
+    L"Applications", L"Graphics", L"Libraries", L"Audio and Drives", L"Winlator Tweaks",
+    L"System Files", L"About and Updates"
+};
+static const WCHAR *g_subs[NPAGES] = {
+    L"Choose which Windows version each program sees",
+    L"Direct3D renderer, virtual desktop and screen DPI",
+    L"DLL overrides: builtin, native or disabled",
+    L"Sound driver and the drives of this Wine prefix",
+    L"DXVK / VKD3D presets and Android-friendly fixes",
+    L"Browse, search and edit files (starts in Z:\\opt)",
+    L"Wine version, updates and installer"
+};
+static int g_side_sel = 0, g_side_hot = -1;
+
+static void paint_side(HDC dc, RECT *rc)
+{
+    HBRUSH bg = CreateSolidBrush(C_SIDE);
+    HFONT of;
+    int i;
+    FillRect(dc, rc, bg);
+    DeleteObject(bg);
+    SetBkMode(dc, TRANSPARENT);
+    draw_logo(dc, S(16), S(16), S(38));
+    of = (HFONT)SelectObject(dc, g_font_sideb);
+    SetTextColor(dc, RGB(255, 255, 255));
+    TextOutW(dc, S(64), S(15), L"Winlator", 8);
+    SelectObject(dc, g_font_sub);
+    SetTextColor(dc, RGB(205, 190, 200));
+    TextOutW(dc, S(64), S(38), L"Configuration", 13);
+    for (i = 0; i < NPAGES; i++) {
+        RECT it;
+        int ty;
+        it.left = S(8); it.right = rc->right - S(8);
+        it.top = S(ITEM_TOP) + i * S(ITEM_H);
+        it.bottom = it.top + S(ITEM_H) - S(4);
+        if (i == g_side_sel || i == g_side_hot) {
+            HBRUSH b = CreateSolidBrush(i == g_side_sel ? C_ORANGE : C_HOT);
+            HPEN np = (HPEN)GetStockObject(NULL_PEN);
+            HBRUSH ob = (HBRUSH)SelectObject(dc, b);
+            HPEN op = (HPEN)SelectObject(dc, np);
+            RoundRect(dc, it.left, it.top, it.right, it.bottom, S(12), S(12));
+            SelectObject(dc, op); SelectObject(dc, ob);
+            DeleteObject(b);
+        }
+        ty = it.top + (it.bottom - it.top - S(18)) / 2;
+        draw_icon(dc, i, it.left + S(14), ty, S(18), RGB(255, 255, 255));
+        SelectObject(dc, g_font_side);
+        SetTextColor(dc, RGB(255, 255, 255));
+        TextOutW(dc, it.left + S(46), ty, g_names[i], (int)wcslen(g_names[i]));
+    }
+    SelectObject(dc, g_font_sub);
+    SetTextColor(dc, RGB(170, 150, 165));
+    {
+        RECT fr = { S(16), rc->bottom - S(34), rc->right, rc->bottom - S(10) };
+        DrawTextW(dc, WW(APP_VERSION), -1, &fr, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
+    }
+    SelectObject(dc, of);
+}
+
+static int side_hit(int y)
+{
+    int i;
+    if (y < S(ITEM_TOP)) return -1;
+    i = (y - S(ITEM_TOP)) / S(ITEM_H);
+    return (i >= 0 && i < NPAGES) ? i : -1;
+}
+
+static LRESULT CALLBACK SideProc(HWND h, UINT m, WPARAM w, LPARAM l)
+{
+    switch (m) {
+    case WM_ERASEBKGND:
+        return 1;
+    case WM_PAINT: {
+        PAINTSTRUCT ps; RECT rc;
+        HDC dc = BeginPaint(h, &ps), md;
+        HBITMAP bm, ob;
+        GetClientRect(h, &rc);
+        md = CreateCompatibleDC(dc);
+        bm = CreateCompatibleBitmap(dc, rc.right, rc.bottom);
+        ob = (HBITMAP)SelectObject(md, bm);
+        paint_side(md, &rc);
+        BitBlt(dc, 0, 0, rc.right, rc.bottom, md, 0, 0, SRCCOPY);
+        SelectObject(md, ob);
+        DeleteObject(bm);
+        DeleteDC(md);
+        EndPaint(h, &ps);
+        return 0;
+    }
+    case WM_LBUTTONDOWN: {
+        int i = side_hit(GET_Y_LPARAM(l));
+        SetFocus(h);
+        if (i >= 0) PostMessageW(g_main, WM_APP_PAGE, (WPARAM)i, 0);
+        return 0;
+    }
+    case WM_MOUSEMOVE: {
+        int i = side_hit(GET_Y_LPARAM(l));
+        TRACKMOUSEEVENT te;
+        te.cbSize = sizeof(te); te.dwFlags = TME_LEAVE; te.hwndTrack = h; te.dwHoverTime = 0;
+        TrackMouseEvent(&te);
+        if (i != g_side_hot) { g_side_hot = i; InvalidateRect(h, NULL, FALSE); }
+        return 0;
+    }
+    case WM_MOUSELEAVE:
+        g_side_hot = -1;
+        InvalidateRect(h, NULL, FALSE);
+        return 0;
+    case WM_GETDLGCODE:
+        return DLGC_WANTARROWS;
+    case WM_KEYDOWN:
+        if (w == VK_DOWN && g_side_sel < NPAGES - 1) PostMessageW(g_main, WM_APP_PAGE, (WPARAM)(g_side_sel + 1), 0);
+        if (w == VK_UP && g_side_sel > 0) PostMessageW(g_main, WM_APP_PAGE, (WPARAM)(g_side_sel - 1), 0);
+        return 0;
+    }
+    return DefWindowProcW(h, m, w, l);
+}
+
+/* ------------------------------------------------------------------ */
 /* Window construction                                                 */
 /* ------------------------------------------------------------------ */
-static const WCHAR *g_tabs[NPAGES] = {
-    L"Applications", L"Graphics", L"Libraries", L"Audio / Drives", L"Winlator Tweaks", L"About / Update"
-};
-
 static void build_pages(void)
 {
     int i, x;
@@ -742,40 +1206,42 @@ static void build_pages(void)
         { ID_TOOL_TASK, L"Task Manager" }, { ID_TOOL_REG, L"Registry Editor" },
         { ID_TOOL_EXPL, L"File Explorer" }, { ID_TOOL_UNINST, L"Uninstaller" }, { ID_TOOL_CMD, L"Command Prompt" }
     };
-    RECT rc;
+    RECT cr;
+    int px, py, pw, ph;
 
-    GetClientRect(g_tab, &rc);
-    TabCtrl_AdjustRect(g_tab, FALSE, &rc);
+    GetClientRect(g_main, &cr);
+    px = S(SIDE_W + 10); py = S(74);
+    pw = cr.right - px - S(10);
+    ph = cr.bottom - py - S(62);
     for (i = 0; i < NPAGES; i++)
         g_page[i] = CreateWindowExW(0, L"WCPage", NULL, WS_CHILD | WS_CLIPCHILDREN | (i == 0 ? WS_VISIBLE : 0),
-                                    rc.left, rc.top, rc.right - rc.left, rc.bottom - rc.top,
-                                    g_tab, NULL, g_inst, NULL);
+                                    px, py, pw, ph, g_main, NULL, g_inst, NULL);
 
     /* 0: Applications */
-    LABEL(0, L"Choose an application, or Default Settings, then pick the Windows version it should see:", 15, 12, 580);
-    mk(0, L"LISTBOX", NULL, LBS_NOTIFY | WS_VSCROLL | WS_TABSTOP, WS_EX_CLIENTEDGE, 15, 40, 390, 215, ID_APPLIST);
-    BTN(0, L"Add application...", 420, 40, 165, 30, ID_APPADD);
-    BTN(0, L"Remove", 420, 78, 165, 30, ID_APPDEL);
-    LABEL(0, L"Windows version:", 15, 272, 200);
-    COMBO(0, 15, 294, 300, ID_APPVER);
+    LABEL(0, L"Choose an application, or Default Settings, then pick the Windows version it should see:", 15, 12, 590);
+    mk(0, L"LISTBOX", NULL, LBS_NOTIFY | WS_VSCROLL | WS_TABSTOP, WS_EX_CLIENTEDGE, 15, 40, 400, 255, ID_APPLIST);
+    BTN(0, L"Add application...", 430, 40, 165, 34, ID_APPADD);
+    BTN(0, L"Remove", 430, 82, 165, 34, ID_APPDEL);
+    LABEL(0, L"Windows version:", 15, 312, 200);
+    COMBO(0, 15, 334, 300, ID_APPVER);
     for (i = 0; i < NVER; i++) SendMessageW(ctl(ID_APPVER), CB_ADDSTRING, 0, (LPARAM)g_ver[i].label);
 
     /* 1: Graphics */
-    GROUP(1, L"Direct3D", 10, 8, 585, 160);
+    GROUP(1, L"Direct3D", 10, 8, 595, 165);
     LABEL(1, L"Renderer:", 25, 38, 170);
-    COMBO(1, 205, 34, 220, ID_RENDERER);
+    COMBO(1, 205, 34, 230, ID_RENDERER);
     LABEL(1, L"Video memory:", 25, 72, 170);
-    COMBO(1, 205, 68, 220, ID_VRAM);
-    CHECK(1, L"Enable command stream multithreading (CSMT)", 25, 102, 550, ID_CSMT);
-    CHECK(1, L"Strict draw ordering (fixes glitches, slower)", 25, 128, 550, ID_STRICT);
-    GROUP(1, L"Screen", 10, 178, 585, 150);
-    CHECK(1, L"Emulate a virtual desktop", 25, 204, 550, ID_VDESK);
-    LABEL(1, L"Desktop size:", 45, 238, 150);
-    mk(1, L"EDIT", NULL, ES_NUMBER | ES_CENTER | WS_TABSTOP, WS_EX_CLIENTEDGE, 205, 234, 75, 24, ID_VDW);
-    LABEL(1, L"x", 288, 238, 14);
-    mk(1, L"EDIT", NULL, ES_NUMBER | ES_CENTER | WS_TABSTOP, WS_EX_CLIENTEDGE, 308, 234, 75, 24, ID_VDH);
-    LABEL(1, L"Screen resolution (DPI):", 25, 280, 175);
-    mk(1, L"COMBOBOX", NULL, CBS_DROPDOWN | WS_VSCROLL | WS_TABSTOP, 0, 205, 276, 120, 200, ID_DPI);
+    COMBO(1, 205, 68, 230, ID_VRAM);
+    CHECK(1, L"Enable command stream multithreading (CSMT)", 25, 104, 550, ID_CSMT);
+    CHECK(1, L"Strict draw ordering (fixes glitches, slower)", 25, 132, 550, ID_STRICT);
+    GROUP(1, L"Screen", 10, 185, 595, 150);
+    CHECK(1, L"Emulate a virtual desktop", 25, 211, 550, ID_VDESK);
+    LABEL(1, L"Desktop size:", 45, 245, 150);
+    mk(1, L"EDIT", NULL, ES_NUMBER | ES_CENTER | WS_TABSTOP, WS_EX_CLIENTEDGE, 205, 241, 75, 24, ID_VDW);
+    LABEL(1, L"x", 288, 245, 14);
+    mk(1, L"EDIT", NULL, ES_NUMBER | ES_CENTER | WS_TABSTOP, WS_EX_CLIENTEDGE, 308, 241, 75, 24, ID_VDH);
+    LABEL(1, L"Screen resolution (DPI):", 25, 287, 175);
+    mk(1, L"COMBOBOX", NULL, CBS_DROPDOWN | WS_VSCROLL | WS_TABSTOP, 0, 205, 283, 120, 200, ID_DPI);
     cb_fill(ctl(ID_RENDERER), g_renderers_lbl, 4);
     cb_fill(ctl(ID_VRAM), g_vram_lbl, 5);
     cb_fill(ctl(ID_DPI), g_dpi_lbl, 5);
@@ -784,33 +1250,51 @@ static void build_pages(void)
     LABEL(2, L"New override for library (e.g. d3d11):", 15, 12, 400);
     mk(2, L"EDIT", NULL, ES_AUTOHSCROLL | WS_TABSTOP, WS_EX_CLIENTEDGE, 15, 36, 200, 26, ID_DLLNAME);
     COMBO(2, 225, 36, 200, ID_DLLMODE);
-    BTN(2, L"Add / Update", 435, 34, 150, 30, ID_DLLADD);
-    mk(2, L"LISTBOX", NULL, LBS_NOTIFY | WS_VSCROLL | WS_TABSTOP, WS_EX_CLIENTEDGE, 15, 76, 410, 245, ID_DLLLIST);
-    BTN(2, L"Remove", 435, 76, 150, 30, ID_DLLDEL);
+    BTN(2, L"Add / Update", 440, 33, 155, 34, ID_DLLADD);
+    mk(2, L"LISTBOX", NULL, LBS_NOTIFY | WS_VSCROLL | WS_TABSTOP, WS_EX_CLIENTEDGE, 15, 80, 410, 295, ID_DLLLIST);
+    BTN(2, L"Remove", 440, 80, 155, 34, ID_DLLDEL);
     for (i = 0; i < NMODE; i++) SendMessageW(ctl(ID_DLLMODE), CB_ADDSTRING, 0, (LPARAM)g_mode[i].label);
 
     /* 3: Audio & Drives */
-    GROUP(3, L"Audio", 10, 8, 585, 70);
+    GROUP(3, L"Audio", 10, 8, 595, 70);
     LABEL(3, L"Audio driver:", 25, 38, 170);
     COMBO(3, 205, 34, 260, ID_AUDIO);
     cb_fill(ctl(ID_AUDIO), g_audio_lbl, 4);
-    GROUP(3, L"Drives in this Wine prefix", 10, 90, 585, 240);
-    mk(3, L"LISTBOX", NULL, WS_VSCROLL | LBS_NOSEL, WS_EX_CLIENTEDGE, 25, 116, 555, 200, ID_DRIVES);
+    GROUP(3, L"Drives in this Wine prefix", 10, 90, 595, 280);
+    mk(3, L"LISTBOX", NULL, WS_VSCROLL | LBS_NOSEL, WS_EX_CLIENTEDGE, 25, 116, 565, 240, ID_DRIVES);
 
     /* 4: Winlator tweaks */
-    GROUP(4, L"Compatibility", 10, 8, 585, 215);
-    for (i = 0; i < 7; i++) CHECK(4, tweaks[i].t, 25, 32 + 25 * i, 555, tweaks[i].id);
-    GROUP(4, L"Quick tools", 10, 232, 585, 90);
-    for (i = 0, x = 25; i < 5; i++, x += 111) BTN(4, tools[i].t, x, 264, 105, 36, tools[i].id);
+    GROUP(4, L"Compatibility", 10, 8, 595, 220);
+    for (i = 0; i < 7; i++) CHECK(4, tweaks[i].t, 25, 34 + 26 * i, 565, tweaks[i].id);
+    GROUP(4, L"Quick tools", 10, 240, 595, 95);
+    for (i = 0, x = 25; i < 5; i++, x += 114) BTN(4, tools[i].t, x, 274, 108, 40, tools[i].id);
 
-    /* 5: About & Update */
-    mk(5, L"STATIC", NULL, SS_LEFT, 0, 15, 12, 570, 150, ID_ABOUT_INFO);
-    GROUP(5, L"Updates", 10, 175, 585, 150);
-    BTN(5, L"Check for updates", 25, 204, 210, 34, ID_UPD_CHECK);
-    BTN(5, L"Install as default winecfg", 245, 204, 230, 34, ID_UPD_INSTALL);
-    mk(5, L"STATIC", L"", SS_LEFT, 0, 25, 252, 555, 60, ID_UPD_STATUS);
+    /* 5: Files */
+    LABEL(5, L"Folder:", 15, 14, 60);
+    mk(5, L"EDIT", NULL, ES_AUTOHSCROLL | WS_TABSTOP, WS_EX_CLIENTEDGE, 75, 10, 360, 26, ID_F_PATH);
+    BTN(5, L"Go", 445, 8, 70, 30, ID_F_GO);
+    BTN(5, L"Up", 525, 8, 70, 30, ID_F_UP);
+    LABEL(5, L"Search:", 15, 50, 60);
+    mk(5, L"EDIT", NULL, ES_AUTOHSCROLL | WS_TABSTOP, WS_EX_CLIENTEDGE, 75, 46, 360, 26, ID_F_SEARCH);
+    BTN(5, L"Find in folder", 445, 44, 150, 30, ID_F_FIND);
+    mk(5, L"LISTBOX", NULL, LBS_NOTIFY | WS_VSCROLL | WS_HSCROLL | WS_TABSTOP, WS_EX_CLIENTEDGE, 15, 84, 230, 250, ID_F_LIST);
+    mk(5, L"STATIC", L"No file open", SS_LEFT | SS_PATHELLIPSIS, 0, 260, 84, 335, 20, ID_F_NAME);
+    mk(5, L"EDIT", NULL, ES_MULTILINE | ES_AUTOVSCROLL | ES_AUTOHSCROLL | ES_WANTRETURN | WS_VSCROLL | WS_HSCROLL | WS_TABSTOP,
+       WS_EX_CLIENTEDGE, 260, 108, 335, 226, ID_F_EDIT);
+    BTN(5, L"Save", 260, 342, 110, 34, ID_F_SAVE);
+    BTN(5, L"Reload", 380, 342, 110, 34, ID_F_RELOAD);
+    mk(5, L"STATIC", L"", SS_LEFT, 0, 15, 342, 235, 40, ID_F_STAT);
 
-    EnumChildWindows(g_tab, set_font_cb, (LPARAM)g_font);
+    /* 6: About & Update */
+    mk(6, L"STATIC", NULL, SS_LEFT, 0, 15, 12, 580, 150, ID_ABOUT_INFO);
+    GROUP(6, L"Updates", 10, 175, 595, 160);
+    BTN(6, L"Check for updates", 25, 206, 210, 38, ID_UPD_CHECK);
+    BTN(6, L"Install as default winecfg", 245, 206, 230, 38, ID_UPD_INSTALL);
+    mk(6, L"STATIC", L"", SS_LEFT, 0, 25, 258, 565, 60, ID_UPD_STATUS);
+
+    EnumChildWindows(g_main, set_font_cb, (LPARAM)g_font);
+    SendMessageW(ctl(ID_F_EDIT), WM_SETFONT, (WPARAM)g_font_mono, TRUE);
+    SendMessageW(ctl(ID_F_LIST), WM_SETFONT, (WPARAM)g_font_mono, TRUE);
 }
 
 static void load_all(void)
@@ -833,25 +1317,85 @@ static void save_all(void)
                 L"Winlator Configuration", MB_OK | MB_ICONINFORMATION);
 }
 
-static void paint_header(HWND hwnd)
+static void show_page(int n)
 {
-    PAINTSTRUCT ps; RECT rc; HDC dc = BeginPaint(hwnd, &ps);
-    TRIVERTEX tv[2]; GRADIENT_RECT gr = { 0, 1 };
-    HFONT old; int hh = S(60);
-    GetClientRect(hwnd, &rc);
-    tv[0].x = 0; tv[0].y = 0;
-    tv[0].Red = 0x0B00; tv[0].Green = 0x5F00; tv[0].Blue = 0xFF00; tv[0].Alpha = 0;
-    tv[1].x = rc.right; tv[1].y = hh;
-    tv[1].Red = 0x6A00; tv[1].Green = 0x3D00; tv[1].Blue = 0xE800; tv[1].Alpha = 0;
-    GradientFill(dc, tv, 2, &gr, 1, GRADIENT_FILL_RECT_H);
+    RECT cr, hr;
+    int i;
+    if (n < 0 || n >= NPAGES) return;
+    if (n != g_side_sel && g_side_sel == 5 && !confirm_discard()) return;
+    for (i = 0; i < NPAGES; i++) ShowWindow(g_page[i], i == n ? SW_SHOW : SW_HIDE);
+    g_side_sel = n;
+    InvalidateRect(g_side, NULL, FALSE);
+    GetClientRect(g_main, &cr);
+    SetRect(&hr, S(SIDE_W), 0, cr.right, S(72));
+    InvalidateRect(g_main, &hr, TRUE);
+    if (n == 5 && !g_files_inited) files_init();
+}
+
+static void draw_button(const DRAWITEMSTRUCT *d)
+{
+    HDC dc = d->hDC;
+    RECT rc = d->rcItem;
+    WCHAR t[96];
+    BOOL primary = d->CtlID == ID_APPLY || d->CtlID == ID_UPD_CHECK || d->CtlID == ID_F_SAVE;
+    BOOL down = (d->itemState & ODS_SELECTED) != 0, dis = (d->itemState & ODS_DISABLED) != 0;
+    BOOL inbar = d->CtlID == ID_APPLY || d->CtlID == ID_CLOSE;
+    COLORREF fill = primary ? (down ? C_ORANGE2 : C_ORANGE) : (down ? RGB(214, 210, 206) : RGB(237, 236, 235));
+    COLORREF edge = primary ? fill : RGB(205, 199, 194);
+    COLORREF txt = primary ? RGB(255, 255, 255) : C_TEXT;
+    HBRUSH bgb = CreateSolidBrush(inbar ? C_BAR : RGB(255, 255, 255));
+    HBRUSH b = CreateSolidBrush(fill), ob;
+    HPEN p = CreatePen(PS_SOLID, 1, edge), op;
+    HFONT of;
+    FillRect(dc, &rc, bgb);
+    ob = (HBRUSH)SelectObject(dc, b);
+    op = (HPEN)SelectObject(dc, p);
+    RoundRect(dc, rc.left, rc.top, rc.right, rc.bottom, S(10), S(10));
+    SelectObject(dc, op); SelectObject(dc, ob);
+    GetWindowTextW(d->hwndItem, t, 96);
     SetBkMode(dc, TRANSPARENT);
-    SetTextColor(dc, RGB(255, 255, 255));
-    old = (HFONT)SelectObject(dc, g_font_title);
-    TextOutW(dc, S(18), S(8), L"Winlator Configuration", 22);
+    SetTextColor(dc, dis ? RGB(160, 160, 160) : txt);
+    of = (HFONT)SelectObject(dc, g_font);
+    if (down) OffsetRect(&rc, 0, 1);
+    DrawTextW(dc, t, -1, &rc, DT_CENTER | DT_VCENTER | DT_SINGLELINE);
+    SelectObject(dc, of);
+    if (d->itemState & ODS_FOCUS) {
+        RECT fr = d->rcItem;
+        InflateRect(&fr, -S(4), -S(4));
+        DrawFocusRect(dc, &fr);
+    }
+    DeleteObject(b); DeleteObject(p); DeleteObject(bgb);
+}
+
+static void paint_main(HWND hwnd)
+{
+    PAINTSTRUCT ps; RECT rc, bar;
+    HDC dc = BeginPaint(hwnd, &ps);
+    HBRUSH bb = CreateSolidBrush(C_BAR), lb = CreateSolidBrush(RGB(225, 222, 219)), ob2;
+    HFONT old;
+    GetClientRect(hwnd, &rc);
+    /* header */
+    SetBkMode(dc, TRANSPARENT);
+    old = (HFONT)SelectObject(dc, g_font_head);
+    SetTextColor(dc, C_TEXT);
+    TextOutW(dc, S(SIDE_W + 26), S(12), g_titles[g_side_sel], (int)wcslen(g_titles[g_side_sel]));
     SelectObject(dc, g_font_sub);
-    SetTextColor(dc, RGB(225, 230, 255));
-    TextOutW(dc, S(20), S(37), L"Wine settings for Windows apps on Android", 41);
+    SetTextColor(dc, C_SUB);
+    TextOutW(dc, S(SIDE_W + 27), S(45), g_subs[g_side_sel], (int)wcslen(g_subs[g_side_sel]));
+    SetRect(&bar, S(SIDE_W), S(70), rc.right, S(71));
+    FillRect(dc, &bar, lb);
+    /* orange accent under the title */
+    ob2 = CreateSolidBrush(C_ORANGE);
+    SetRect(&bar, S(SIDE_W + 26), S(69), S(SIDE_W + 66), S(72));
+    FillRect(dc, &bar, ob2);
+    DeleteObject(ob2);
+    /* bottom bar */
+    SetRect(&bar, S(SIDE_W), rc.bottom - S(62), rc.right, rc.bottom);
+    FillRect(dc, &bar, bb);
+    bar.bottom = bar.top + 1;
+    FillRect(dc, &bar, lb);
     SelectObject(dc, old);
+    DeleteObject(bb); DeleteObject(lb);
     EndPaint(hwnd, &ps);
 }
 
@@ -859,38 +1403,43 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT m, WPARAM w, LPARAM l)
 {
     switch (m) {
     case WM_CREATE: {
-        TCITEMW ti; int i;
+        RECT cr;
         g_main = hwnd;
-        g_tab = CreateWindowExW(0, WC_TABCONTROLW, NULL, WS_CHILD | WS_VISIBLE | WS_CLIPCHILDREN | WS_TABSTOP,
-                                S(10), S(70), S(620), S(395), hwnd, (HMENU)(INT_PTR)ID_TAB, g_inst, NULL);
-        SendMessageW(g_tab, WM_SETFONT, (WPARAM)g_font, TRUE);
-        memset(&ti, 0, sizeof(ti));
-        ti.mask = TCIF_TEXT;
-        for (i = 0; i < NPAGES; i++) { ti.pszText = (WCHAR *)g_tabs[i]; SendMessageW(g_tab, TCM_INSERTITEMW, i, (LPARAM)&ti); }
+        GetClientRect(hwnd, &cr);
+        g_side = CreateWindowExW(0, L"WCSide", NULL, WS_CHILD | WS_VISIBLE | WS_TABSTOP,
+                                 0, 0, S(SIDE_W), cr.bottom, hwnd, (HMENU)(INT_PTR)ID_SIDE, g_inst, NULL);
         build_pages();
-        CreateWindowExW(0, L"BUTTON", L"Apply", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_DEFPUSHBUTTON,
-                        S(430), S(478), S(95), S(32), hwnd, (HMENU)(INT_PTR)ID_APPLY, g_inst, NULL);
-        CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_PUSHBUTTON,
-                        S(535), S(478), S(95), S(32), hwnd, (HMENU)(INT_PTR)ID_CLOSE, g_inst, NULL);
-        EnumChildWindows(hwnd, set_font_cb, (LPARAM)g_font);
+        CreateWindowExW(0, L"BUTTON", L"Apply", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                        cr.right - S(238), cr.bottom - S(50), S(110), S(38), hwnd, (HMENU)(INT_PTR)ID_APPLY, g_inst, NULL);
+        CreateWindowExW(0, L"BUTTON", L"Close", WS_CHILD | WS_VISIBLE | WS_TABSTOP | BS_OWNERDRAW,
+                        cr.right - S(120), cr.bottom - S(50), S(110), S(38), hwnd, (HMENU)(INT_PTR)ID_CLOSE, g_inst, NULL);
+        {
+            HWND b;
+            if ((b = GetDlgItem(hwnd, ID_APPLY)) != NULL) SendMessageW(b, WM_SETFONT, (WPARAM)g_font, TRUE);
+            if ((b = GetDlgItem(hwnd, ID_CLOSE)) != NULL) SendMessageW(b, WM_SETFONT, (WPARAM)g_font, TRUE);
+        }
         load_all();
         return 0;
     }
     case WM_PAINT:
-        paint_header(hwnd);
+        paint_main(hwnd);
         return 0;
-    case WM_NOTIFY:
-        if (((NMHDR *)l)->idFrom == ID_TAB && ((NMHDR *)l)->code == TCN_SELCHANGE) {
-            int sel = TabCtrl_GetCurSel(g_tab), i;
-            for (i = 0; i < NPAGES; i++) ShowWindow(g_page[i], i == sel ? SW_SHOW : SW_HIDE);
-        }
+    case WM_DRAWITEM:
+        if (((DRAWITEMSTRUCT *)l)->CtlType == ODT_BUTTON) { draw_button((DRAWITEMSTRUCT *)l); return TRUE; }
+        return FALSE;
+    case WM_APP_PAGE:
+        show_page((int)w);
         return 0;
     case WM_COMMAND: {
         int id = LOWORD(w), code = HIWORD(w);
         WCHAR msg[512];
         switch (id) {
+        case IDOK:
+            if (GetFocus() == ctl(ID_F_PATH)) files_go();
+            else if (GetFocus() == ctl(ID_F_SEARCH)) files_find();
+            break;
         case ID_APPLY: save_all(); break;
-        case ID_CLOSE: DestroyWindow(hwnd); break;
+        case ID_CLOSE: SendMessageW(hwnd, WM_CLOSE, 0, 0); break;
         case ID_APPLIST: if (code == LBN_SELCHANGE) on_app_sel(); break;
         case ID_APPADD: app_add(); break;
         case ID_APPDEL: app_del(); break;
@@ -904,6 +1453,13 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT m, WPARAM w, LPARAM l)
         case ID_TOOL_EXPL: run_tool(L"explorer.exe"); break;
         case ID_TOOL_UNINST: run_tool(L"uninstaller.exe"); break;
         case ID_TOOL_CMD: run_tool(L"cmd.exe"); break;
+        case ID_F_GO: if (confirm_discard()) files_go(); break;
+        case ID_F_UP: if (confirm_discard()) files_up(); break;
+        case ID_F_FIND: files_find(); break;
+        case ID_F_LIST: if (code == LBN_SELCHANGE || code == LBN_DBLCLK) files_clicked(code); break;
+        case ID_F_EDIT: if (code == EN_CHANGE) g_dirty = TRUE; break;
+        case ID_F_SAVE: file_save(); break;
+        case ID_F_RELOAD: if (g_file[0] && confirm_discard()) file_open(g_file); break;
         case ID_UPD_CHECK: do_update(); break;
         case ID_UPD_INSTALL:
             install_self(msg, 511);
@@ -913,6 +1469,10 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT m, WPARAM w, LPARAM l)
         }
         return 0;
     }
+    case WM_CLOSE:
+        if (!confirm_discard()) return 0;
+        DestroyWindow(hwnd);
+        return 0;
     case WM_DESTROY:
         PostQuitMessage(0);
         return 0;
@@ -920,11 +1480,11 @@ static LRESULT CALLBACK MainProc(HWND hwnd, UINT m, WPARAM w, LPARAM l)
     return DefWindowProcW(hwnd, m, w, l);
 }
 
-static HFONT make_font(int pt, int weight)
+static HFONT make_font(int pt, int weight, const WCHAR *face)
 {
     return CreateFontW(-MulDiv(pt, g_dpi, 72), 0, 0, 0, weight, FALSE, FALSE, FALSE, DEFAULT_CHARSET,
                        OUT_DEFAULT_PRECIS, CLIP_DEFAULT_PRECIS, CLEARTYPE_QUALITY,
-                       DEFAULT_PITCH | FF_SWISS, L"Segoe UI");
+                       DEFAULT_PITCH | FF_SWISS, face);
 }
 
 int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show)
@@ -934,6 +1494,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show)
     RECT r;
     HDC dc;
     MSG msg;
+    HICON ico;
     DWORD style = WS_OVERLAPPED | WS_CAPTION | WS_SYSMENU | WS_MINIMIZEBOX;
     (void)prev;
     g_inst = inst;
@@ -947,16 +1508,22 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show)
     }
 
     icc.dwSize = sizeof(icc);
-    icc.dwICC = ICC_TAB_CLASSES | ICC_STANDARD_CLASSES | ICC_LISTVIEW_CLASSES;
+    icc.dwICC = ICC_STANDARD_CLASSES | ICC_LISTVIEW_CLASSES;
     InitCommonControlsEx(&icc);
 
     dc = GetDC(NULL);
     g_dpi = GetDeviceCaps(dc, LOGPIXELSX);
     ReleaseDC(NULL, dc);
     if (g_dpi < 96) g_dpi = 96;
-    g_font = make_font(9, FW_NORMAL);
-    g_font_title = make_font(17, FW_SEMIBOLD);
-    g_font_sub = make_font(9, FW_NORMAL);
+    g_font = make_font(9, FW_NORMAL, L"Ubuntu");
+    g_font_head = make_font(17, FW_SEMIBOLD, L"Ubuntu");
+    g_font_sub = make_font(9, FW_NORMAL, L"Ubuntu");
+    g_font_side = make_font(10, FW_NORMAL, L"Ubuntu");
+    g_font_sideb = make_font(12, FW_SEMIBOLD, L"Ubuntu");
+    g_font_mono = make_font(9, FW_NORMAL, L"Ubuntu Mono");
+
+    ico = LoadIconW(inst, MAKEINTRESOURCEW(2));
+    if (!ico) ico = LoadIcon(NULL, IDI_APPLICATION);
 
     memset(&wc, 0, sizeof(wc));
     wc.cbSize = sizeof(wc);
@@ -966,13 +1533,18 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, LPWSTR cmd, int show)
     wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
     wc.lpszClassName = L"WCPage";
     RegisterClassExW(&wc);
+    wc.lpfnWndProc = SideProc;
+    wc.hbrBackground = NULL;
+    wc.lpszClassName = L"WCSide";
+    RegisterClassExW(&wc);
     wc.lpfnWndProc = MainProc;
-    wc.hbrBackground = (HBRUSH)(COLOR_BTNFACE + 1);
+    wc.hbrBackground = (HBRUSH)(COLOR_WINDOW + 1);
     wc.lpszClassName = L"WinlatorCfgMain";
-    wc.hIcon = LoadIcon(NULL, IDI_APPLICATION);
+    wc.hIcon = ico;
+    wc.hIconSm = ico;
     RegisterClassExW(&wc);
 
-    SetRect(&r, 0, 0, S(640), S(525));
+    SetRect(&r, 0, 0, S(840), S(580));
     AdjustWindowRect(&r, style, FALSE);
     g_main = CreateWindowExW(0, L"WinlatorCfgMain", L"Winlator Configuration", style,
                              (GetSystemMetrics(SM_CXSCREEN) - (r.right - r.left)) / 2,
